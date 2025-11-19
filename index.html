@@ -1,0 +1,323 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>US Age-Adjusted Death Rates — D3 (Choropleth + Trend, Robust)</title>
+<style>
+  body { margin: 20px; font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  .layout { display: grid; grid-template-columns: 760px 520px; gap: 20px; align-items: start; }
+  .panel { border: 1px solid #ddd; border-radius: 10px; padding: 14px; }
+  .title { font-weight: 700; margin: 0 0 8px; }
+  .subtle { color: #666; font-size: 12px; }
+  .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  svg { display: block; }
+  .state { stroke: #fff; stroke-width: 1; cursor: pointer; }
+  .state.selected { stroke: #222; stroke-width: 2; }
+  .legend { display:flex; align-items:center; gap:8px; margin-top:8px; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: rgba(0,0,0,.75);
+    color: #fff; font-size: 12px; padding: 6px 8px; border-radius: 6px;
+    transform: translate(-50%, -120%); white-space: nowrap;
+  }
+  .btn { padding:4px 8px; border:1px solid #ccc; border-radius:6px; background:#f7f7f7; cursor:pointer; }
+  .btn:hover { background:#eee; }
+</style>
+
+<div class="panel">
+  <div class="title">Controls</div>
+  <div class="controls">
+    <label>Cause: <select id="cause"></select></label>
+    <label>Year: <input id="year" type="range" min="1999" max="2017" value="2017" step="1"></label>
+    <span id="yearVal" style="min-width:40px;display:inline-block;text-align:right">2017</span>
+    <button id="reset" class="btn">Reset</button>
+    <span id="status" class="subtle"></span>
+  </div>
+  <div class="subtle">
+    Age-adjusted death rates (per 100,000) for the 10 leading causes of death in the U.S., 1999–present.
+    Rates are age-adjusted to the 2000 U.S. standard population (NCHS/CDC).
+  </div>
+</div>
+
+<div class="layout">
+  <div class="panel">
+    <div class="title">US Map — Age-adjusted Death Rate per 100,000</div>
+    <svg id="map" width="760" height="500"></svg>
+    <div class="legend">
+      <span class="subtle">Lower</span>
+      <svg id="legend" width="260" height="46"></svg>
+      <span class="subtle">Higher</span>
+    </div>
+    <div class="subtle">Hover a state for details. Click a state to see its last-10-year trend (right).</div>
+  </div>
+
+  <div class="panel">
+    <div class="title">Trend — Last 10 Years</div>
+    <svg id="trend" width="520" height="300"></svg>
+    <div class="subtle" id="trendLabel"></div>
+  </div>
+</div>
+
+<div id="tooltip" class="tooltip" style="opacity:0"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://unpkg.com/topojson-client@3"></script>
+<script>
+const CSV_FILE = "NCHS_-_Leading_Causes_of_Death__United_States.csv";
+const TOPO_URL = "https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json";
+
+const FIPS_TO_NAME = new Map([
+  ["01","Alabama"],["02","Alaska"],["04","Arizona"],["05","Arkansas"],["06","California"],
+  ["08","Colorado"],["09","Connecticut"],["10","Delaware"],["11","District of Columbia"],["12","Florida"],
+  ["13","Georgia"],["15","Hawaii"],["16","Idaho"],["17","Illinois"],["18","Indiana"],
+  ["19","Iowa"],["20","Kansas"],["21","Kentucky"],["22","Louisiana"],["23","Maine"],
+  ["24","Maryland"],["25","Massachusetts"],["26","Michigan"],["27","Minnesota"],["28","Mississippi"],
+  ["29","Missouri"],["30","Montana"],["31","Nebraska"],["32","Nevada"],["33","New Hampshire"],
+  ["34","New Jersey"],["35","New Mexico"],["36","New York"],["37","North Carolina"],["38","North Dakota"],
+  ["39","Ohio"],["40","Oklahoma"],["41","Oregon"],["42","Pennsylvania"],["44","Rhode Island"],
+  ["45","South Carolina"],["46","South Dakota"],["47","Tennessee"],["48","Texas"],["49","Utah"],
+  ["50","Vermont"],["51","Virginia"],["53","Washington"],["54","West Virginia"],["55","Wisconsin"],["56","Wyoming"]
+]);
+
+
+function canon(s) {
+  return String(s ?? "")
+    .replace(/\u00A0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stateNameOf(feature) {
+  const p = feature.properties || {};
+  if (p.name) return canon(p.name);
+  const fips = String(feature.id).padStart(2, "0");
+  return canon(FIPS_TO_NAME.get(fips) || "");
+}
+
+const appState = { cause:null, year:2017, selectedName:"United States" };
+const causeSel  = d3.select("#cause");
+const yearInput = d3.select("#year");
+const yearVal   = d3.select("#yearVal");
+const statusEl  = d3.select("#status");
+const tip       = d3.select("#tooltip");
+
+const mapSVG   = d3.select("#map");
+const legendSVG= d3.select("#legend");
+const trendSVG = d3.select("#trend");
+
+// Map projection
+const mapW = +mapSVG.attr("width"), mapH = +mapSVG.attr("height");
+const proj = d3.geoAlbersUsa().translate([mapW/2, mapH/2]).scale(950);
+const geoPath = d3.geoPath(proj);
+
+// Trend chart scales
+const trW = +trendSVG.attr("width"), trH = +trendSVG.attr("height");
+const trM = {t:20,r:20,b:32,l:44};
+const x = d3.scaleLinear().range([trM.l, trW - trM.r]);
+const y = d3.scaleLinear().range([trH - trM.b, trM.t]);
+trendSVG.append("g").attr("class","x-axis").attr("transform",`translate(0,${trH-trM.b})`);
+trendSVG.append("g").attr("class","y-axis").attr("transform",`translate(${trM.l},0)`);
+
+// Color scale
+const color = d3.scaleSequential(d3.interpolateYlOrRd);
+
+Promise.all([
+  d3.csv(CSV_FILE, d3.autoType),
+  d3.json(TOPO_URL)
+]).then(([raw, topo]) => {
+  const data = raw.map(d => ({
+    year : +d["Year"],
+    cause: canon(d["Cause Name"] ?? d["Cause name"] ?? d["Cause Name"]),
+    name : canon(d["State"]),
+    rate : +d["Age-adjusted Death Rate"]
+  })).filter(d =>
+    Number.isFinite(d.year) &&
+    Number.isFinite(d.rate) &&
+    d.cause.length && d.name.length
+  );
+
+  // Years & causes
+  const years  = Array.from(new Set(data.map(d=>d.year))).sort((a,b)=>a-b);
+  const causes = Array.from(new Set(data.map(d=>d.cause))).sort();
+
+  yearInput.attr("min", d3.min(years)).attr("max", d3.max(years)).attr("value", d3.max(years));
+  yearVal.text(d3.max(years));
+  appState.year = d3.max(years);
+
+  causeSel.selectAll("option").data(causes).join("option")
+    .attr("value", d=>d).text(d=>d);
+  appState.cause = causes[0];
+  causeSel.property("value", appState.cause);
+
+  // Build lookups
+  const byCauseYearName = d3.rollup(
+    data,
+    v => new Map(v.map(r => [canon(r.name), r.rate])),
+    d => d.cause, d => d.year
+  );
+  const byCauseNameSeries = d3.rollup(
+    data.sort((a,b)=>d3.ascending(a.year,b.year)),
+    v => v.map(({year,rate}) => ({year,rate})),
+    d => d.cause, d => canon(d.name)
+  );
+
+  const allFeatures = topojson.feature(topo, topo.objects.states).features;
+  const states = allFeatures.filter(f => {
+    const fips = String(f.id).padStart(2, "0");
+    return ["60","66","69","72","78"].includes(fips) ? false : true;
+  });
+  const borders = topojson.mesh(topo, topo.objects.states, (a,b)=>a!==b);
+  const totalStates = states.length;
+
+
+  function drawLegend(lo, hi) {
+    legendSVG.selectAll("*").remove();
+    const w = +legendSVG.attr("width");
+    const m = {l:10, r:10, t:8, b:28};
+    const g = legendSVG.append("g").attr("transform",`translate(${m.l},${m.t})`);
+    const gradId = "grad-"+Math.random().toString(36).slice(2);
+    const defs = legendSVG.append("defs");
+    const grad = defs.append("linearGradient").attr("id", gradId)
+      .attr("x1","0%").attr("x2","100%").attr("y1","0%").attr("y2","0%");
+    for (let t=0;t<=1.0001;t+=0.1) {
+      grad.append("stop")
+        .attr("offset", `${t*100}%`)
+        .attr("stop-color", color(lo + t*(hi-lo)));
+    }
+    g.append("rect").attr("width", w-m.l-m.r).attr("height", 10).attr("fill", `url(#${gradId})`);
+    const ax = d3.axisBottom(d3.scaleLinear().domain([lo,hi]).range([0, w-m.l-m.r])).ticks(5);
+    g.append("g").attr("transform",`translate(0,10)`).call(ax);
+  }
+
+  function renderMap() {
+    const rates = byCauseYearName.get(appState.cause)?.get(appState.year) || new Map();
+
+    const vals = states.map(f => rates.get(stateNameOf(f))).filter(v => Number.isFinite(v) && v >= 0);
+
+    const matched = states.filter(f => Number.isFinite(rates.get(stateNameOf(f)))).length;
+
+    let lo = 0, hi = 100;
+    if (vals.length) {
+      const sorted = vals.slice().sort(d3.ascending);
+      lo = d3.quantileSorted(sorted, 0.02) ?? d3.min(sorted);
+      hi = d3.quantileSorted(sorted, 0.98) ?? d3.max(sorted);
+      if (!(Number.isFinite(lo) && Number.isFinite(hi) && hi > lo)) {
+        lo = d3.min(sorted); hi = d3.max(sorted);
+      }
+    }
+    color.domain([lo, hi]);
+    drawLegend(lo, hi);
+
+    statusEl.html(
+      `Year ${appState.year} &nbsp;•&nbsp; 
+      Cause: <b>${appState.cause}</b> &nbsp;•&nbsp; 
+      Selected: <b>${appState.selectedName}</b>`
+    );
+
+
+    const g = mapSVG.selectAll("g.map").data([null]).join("g").attr("class","map");
+
+    const paths = g.selectAll("path.state").data(states, d => d.id);
+    paths.join(
+      enter => enter.append("path").attr("class","state")
+        .attr("d", geoPath)
+        .style("fill", d => {
+          const v = rates.get(stateNameOf(d));
+          return Number.isFinite(v) ? color(v) : "#eee";
+        })
+        .on("mousemove", (event, d) => {
+          const nm = stateNameOf(d);
+          const v = rates.get(nm);
+          tip.style("opacity", 1)
+             .html(`<b>${nm}</b><br>${appState.cause}<br>Rate: <b>${Number.isFinite(v)?v.toFixed(1):"N/A"}</b>`)
+             .style("left", (event.pageX) + "px")
+             .style("top", (event.pageY - 10) + "px");
+        })
+        .on("mouseout", () => tip.style("opacity", 0))
+        .on("click", (event, d) => {
+          appState.selectedName = stateNameOf(d);
+          renderTrend();
+          renderMap();
+        }),
+      update => update.transition().duration(400)
+        .style("fill", d => {
+          const v = rates.get(stateNameOf(d));
+          return Number.isFinite(v) ? color(v) : "#eee";
+        })
+    );
+
+    // selected outline
+    mapSVG.selectAll("path.state")
+      .classed("selected", d => stateNameOf(d) === appState.selectedName);
+
+    // hairline borders
+    const border = mapSVG.selectAll("path.border").data([borders]);
+    border.join(
+      enter => enter.append("path").attr("class","border").attr("d", geoPath)
+        .attr("fill","none").attr("stroke","#fff").attr("stroke-width",1)
+    );
+  }
+
+  function renderTrend() {
+    const yEnd = appState.year;
+    const yStart = Math.max(years[0], yEnd - 9);
+
+    const seriesMap = byCauseNameSeries.get(appState.cause) || new Map();
+    const chosen = seriesMap.has(canon(appState.selectedName)) ? appState.selectedName : "United States";
+    if (chosen !== appState.selectedName) appState.selectedName = chosen;
+
+    const full = seriesMap.get(canon(appState.selectedName)) || [];
+    const cur  = full.filter(d => d.year >= yStart && d.year <= yEnd);
+
+    x.domain([yStart - 0.3, yEnd + 0.3]);
+
+    const ymax = Math.max( d3.max(cur, d => d.rate) ?? 1, 1 );
+    y.domain([0, ymax]).nice();
+
+    trendSVG.select(".x-axis").transition().duration(400)
+      .call(d3.axisBottom(x).ticks(cur.length || 10).tickFormat(d3.format("d")));
+    trendSVG.select(".y-axis").transition().duration(400)
+      .call(d3.axisLeft(y));
+
+    const line = d3.line().defined(d => Number.isFinite(d.rate))
+      .x(d => x(d.year)).y(d => y(d.rate));
+
+    const g = trendSVG.selectAll("g.series").data([null]).join("g").attr("class","series");
+    const path = g.selectAll("path.line").data([cur]);
+    path.join(
+      enter => enter.append("path").attr("class","line")
+        .attr("fill","none").attr("stroke","#2c7fb8").attr("stroke-width",2)
+        .attr("d", line),
+      update => update.transition().duration(500).attr("d", line)
+    );
+
+    const pts = g.selectAll("circle.pt").data(cur, d => d.year);
+    pts.join(
+      enter => enter.append("circle").attr("class","pt").attr("r",3)
+        .attr("fill","#2c7fb8").attr("cx", d=>x(d.year)).attr("cy", d=>y(d.rate))
+        .append("title").text(d => `${d.year}: ${d.rate.toFixed(1)}`),
+      update => update.transition().duration(300)
+        .attr("cx", d=>x(d.year)).attr("cy", d=>y(d.rate)),
+      exit => exit.remove()
+    );
+
+    d3.select("#trendLabel").text(`${appState.cause} — ${appState.selectedName} (Years ${yStart}–${yEnd})`);
+
+      }
+
+      causeSel.on("change", () => {
+        appState.cause = causeSel.property("value");
+        renderMap(); renderTrend();
+      });
+      yearInput.on("input", () => {
+        appState.year = +yearInput.property("value");
+        yearVal.text(appState.year);
+        renderMap(); renderTrend();
+      });
+      d3.select("#reset").on("click", () => {
+        appState.cause = causes[0]; causeSel.property("value", appState.cause);
+        appState.year  = d3.max(years); yearInput.property("value", appState.year); yearVal.text(appState.year);
+        appState.selectedName = "United States";
+        renderMap(); renderTrend();
+      });
+
+  renderMap(); renderTrend();
+});
+</script>
