@@ -3,7 +3,11 @@
 <title>US Age-Adjusted Death Rates — D3 (Choropleth + Trend, Robust)</title>
 <style>
   body { margin: 20px; font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-  .layout { display: grid; grid-template-columns: 760px 520px; gap: 20px; align-items: start; }
+  .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+  .zoom-controls { display: flex; gap: 8px; margin-top: 8px; }
+  .zoom-btn { padding: 4px 12px; border: 1px solid #ccc; border-radius: 6px; background: #f7f7f7; cursor: pointer; font-size: 12px; }
+  .zoom-btn:hover { background: #eee; }
+  .trend-container { position: relative; }
   .panel { border: 1px solid #ddd; border-radius: 10px; padding: 14px; }
   .title { font-weight: 700; margin: 0 0 8px; }
   .subtle { color: #666; font-size: 12px; }
@@ -39,7 +43,7 @@
 <div class="layout">
   <div class="panel">
     <div class="title">US Map — Age-adjusted Death Rate per 100,000</div>
-    <svg id="map" width="760" height="500"></svg>
+    <svg id="map" width="100%" height="500" viewBox="0 0 760 500" preserveAspectRatio="xMidYMid meet"></svg>
     <div class="legend">
       <span class="subtle">Lower</span>
       <svg id="legend" width="260" height="46"></svg>
@@ -49,9 +53,18 @@
   </div>
 
   <div class="panel">
-    <div class="title">Trend — Last 10 Years</div>
-    <svg id="trend" width="520" height="300"></svg>
+    <div class="title">Trend — All Causes (1999-2017)</div>
+    <div class="trend-container">
+      <svg id="trend" width="100%" height="500" viewBox="0 0 700 500" preserveAspectRatio="xMidYMid meet"></svg>
+      <div class="zoom-controls">
+        <button id="zoomIn" class="zoom-btn">Zoom In</button>
+        <button id="zoomOut" class="zoom-btn">Zoom Out</button>
+        <button id="zoomReset" class="zoom-btn">Reset Zoom</button>
+        <span class="subtle" style="margin-left: 8px;">Scroll or drag to zoom/pan</span>
+      </div>
+    </div>
     <div class="subtle" id="trendLabel"></div>
+    <div id="trendLegend" style="margin-top: 10px;"></div>
   </div>
 </div>
 
@@ -102,18 +115,65 @@ const mapSVG   = d3.select("#map");
 const legendSVG= d3.select("#legend");
 const trendSVG = d3.select("#trend");
 
-// Map projection
-const mapW = +mapSVG.attr("width"), mapH = +mapSVG.attr("height");
+// Map projection - use viewBox dimensions
+const mapW = 760, mapH = 500;
 const proj = d3.geoAlbersUsa().translate([mapW/2, mapH/2]).scale(950);
 const geoPath = d3.geoPath(proj);
 
-// Trend chart scales
-const trW = +trendSVG.attr("width"), trH = +trendSVG.attr("height");
+// Trend chart scales - use viewBox dimensions
+const trW = 700, trH = 500;
 const trM = {t:20,r:20,b:32,l:44};
 const x = d3.scaleLinear().range([trM.l, trW - trM.r]);
 const y = d3.scaleLinear().range([trH - trM.b, trM.t]);
+
+// Store original domains for zoom reset
+let xOriginalDomain = [0, 1];
+let yOriginalDomain = [0, 1];
+
+// Create clip path for zooming
+trendSVG.append("defs").append("clipPath")
+  .attr("id", "trend-clip")
+  .append("rect")
+  .attr("x", trM.l)
+  .attr("y", trM.t)
+  .attr("width", trW - trM.l - trM.r)
+  .attr("height", trH - trM.t - trM.b);
+
 trendSVG.append("g").attr("class","x-axis").attr("transform",`translate(0,${trH-trM.b})`);
 trendSVG.append("g").attr("class","y-axis").attr("transform",`translate(${trM.l},0)`);
+
+// Create zoom container
+const zoomContainer = trendSVG.append("g").attr("class", "zoom-container").attr("clip-path", "url(#trend-clip)");
+
+// Create a background rect for zoom area
+const zoomBackground = trendSVG.append("rect")
+  .attr("class", "zoom-background")
+  .attr("x", trM.l)
+  .attr("y", trM.t)
+  .attr("width", trW - trM.l - trM.r)
+  .attr("height", trH - trM.t - trM.b)
+  .style("fill", "transparent")
+  .style("cursor", "grab")
+  .style("pointer-events", "all")
+  .on("mousedown", function() {
+    d3.select(this).style("cursor", "grabbing");
+  })
+  .on("mouseup", function() {
+    d3.select(this).style("cursor", "grab");
+  })
+  .on("mouseleave", function() {
+    d3.select(this).style("cursor", "grab");
+  });
+
+// Zoom behavior
+let zoom = null;
+
+// Color scheme for causes (10 distinct colors)
+const causeColors = d3.scaleOrdinal()
+  .range([
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+  ]);
 
 // Color scale
 const color = d3.scaleSequential(d3.interpolateYlOrRd);
@@ -136,6 +196,9 @@ Promise.all([
   // Years & causes
   const years  = Array.from(new Set(data.map(d=>d.year))).sort((a,b)=>a-b);
   const causes = Array.from(new Set(data.map(d=>d.cause))).sort();
+
+  // Initialize cause color scale
+  causeColors.domain(causes);
 
   yearInput.attr("min", d3.min(years)).attr("max", d3.max(years)).attr("value", d3.max(years));
   yearVal.text(d3.max(years));
@@ -166,6 +229,25 @@ Promise.all([
   const borders = topojson.mesh(topo, topo.objects.states, (a,b)=>a!==b);
   const totalStates = states.length;
 
+  // Initialize zoom behavior after data is loaded
+  zoom = d3.zoom()
+    .scaleExtent([0.5, 10])
+    .extent([[trM.l, trM.t], [trW - trM.r, trH - trM.b]])
+    .on("zoom", (event) => {
+      if (!xOriginalDomain || !yOriginalDomain || xOriginalDomain.length < 2 || yOriginalDomain.length < 2) return;
+      
+      const {transform} = event;
+      const xScale = d3.scaleLinear().domain(xOriginalDomain).range([trM.l, trW - trM.r]);
+      const yScale = d3.scaleLinear().domain(yOriginalDomain).range([trH - trM.b, trM.t]);
+      
+      x.domain(transform.rescaleX(xScale).domain());
+      y.domain(transform.rescaleY(yScale).domain());
+      updateTrendAxes();
+      updateTrendPaths();
+    });
+
+  // Apply zoom to the background rect
+  zoomBackground.call(zoom);
 
   function drawLegend(lo, hi) {
     legendSVG.selectAll("*").remove();
@@ -224,7 +306,9 @@ Promise.all([
         })
         .on("mousemove", (event, d) => {
           const nm = stateNameOf(d);
-          const v = rates.get(nm);
+          // Get current rates based on current appState, not the captured rates variable
+          const currentRates = byCauseYearName.get(appState.cause)?.get(appState.year) || new Map();
+          const v = currentRates.get(nm);
           tip.style("opacity", 1)
              .html(`<b>${nm}</b><br>${appState.cause}<br>Rate: <b>${Number.isFinite(v)?v.toFixed(1):"N/A"}</b>`)
              .style("left", (event.pageX) + "px")
@@ -255,56 +339,185 @@ Promise.all([
     );
   }
 
-  function renderTrend() {
-    const yEnd = appState.year;
-    const yStart = Math.max(years[0], yEnd - 9);
+  let allSeriesData = [];
 
-    const seriesMap = byCauseNameSeries.get(appState.cause) || new Map();
-    const chosen = seriesMap.has(canon(appState.selectedName)) ? appState.selectedName : "United States";
-    if (chosen !== appState.selectedName) appState.selectedName = chosen;
-
-    const full = seriesMap.get(canon(appState.selectedName)) || [];
-    const cur  = full.filter(d => d.year >= yStart && d.year <= yEnd);
-
-    x.domain([yStart - 0.3, yEnd + 0.3]);
-
-    const ymax = Math.max( d3.max(cur, d => d.rate) ?? 1, 1 );
-    y.domain([0, ymax]).nice();
-
-    trendSVG.select(".x-axis").transition().duration(400)
-      .call(d3.axisBottom(x).ticks(cur.length || 10).tickFormat(d3.format("d")));
-    trendSVG.select(".y-axis").transition().duration(400)
+  function updateTrendAxes() {
+    trendSVG.select(".x-axis").transition().duration(200)
+      .call(d3.axisBottom(x).ticks(Math.min(20, Math.ceil((x.domain()[1] - x.domain()[0])))).tickFormat(d3.format("d")));
+    trendSVG.select(".y-axis").transition().duration(200)
       .call(d3.axisLeft(y));
+  }
 
-    const line = d3.line().defined(d => Number.isFinite(d.rate))
+  function updateTrendPaths() {
+    if (!allSeriesData || allSeriesData.length === 0) return;
+
+    const line = d3.line().defined(d => Number.isFinite(d.rate) && Number.isFinite(d.year))
       .x(d => x(d.year)).y(d => y(d.rate));
 
-    const g = trendSVG.selectAll("g.series").data([null]).join("g").attr("class","series");
-    const path = g.selectAll("path.line").data([cur]);
-    path.join(
-      enter => enter.append("path").attr("class","line")
-        .attr("fill","none").attr("stroke","#2c7fb8").attr("stroke-width",2)
-        .attr("d", line),
-      update => update.transition().duration(500).attr("d", line)
-    );
+    // Update series groups
+    const seriesG = zoomContainer.selectAll("g.series")
+      .data(allSeriesData, d => d.cause)
+      .join(
+        enter => enter.append("g").attr("class", "series"),
+        update => update,
+        exit => exit.remove()
+      );
 
-    const pts = g.selectAll("circle.pt").data(cur, d => d.year);
-    pts.join(
-      enter => enter.append("circle").attr("class","pt").attr("r",3)
-        .attr("fill","#2c7fb8").attr("cx", d=>x(d.year)).attr("cy", d=>y(d.rate))
-        .append("title").text(d => `${d.year}: ${d.rate.toFixed(1)}`),
-      update => update.transition().duration(300)
-        .attr("cx", d=>x(d.year)).attr("cy", d=>y(d.rate)),
-      exit => exit.remove()
-    );
+    // Update paths - highlight selected cause
+    seriesG.selectAll("path.line")
+      .data(d => [d], d => d.cause)
+      .join(
+        enter => enter.append("path")
+          .attr("class", "line")
+          .attr("fill", "none")
+          .attr("stroke", d => causeColors(d.cause))
+          .attr("stroke-width", d => d.cause === appState.cause ? 4 : 2)
+          .attr("opacity", d => d.cause === appState.cause ? 1 : 0.4)
+          .attr("d", d => line(d.data)),
+        update => update.transition().duration(200)
+          .attr("d", d => line(d.data))
+          .attr("stroke-width", d => d.cause === appState.cause ? 4 : 2)
+          .attr("opacity", d => d.cause === appState.cause ? 1 : 0.4),
+        exit => exit.remove()
+      );
 
-    d3.select("#trendLabel").text(`${appState.cause} — ${appState.selectedName} (Years ${yStart}–${yEnd})`);
+    // Update points - highlight selected cause
+    seriesG.selectAll("circle.pt")
+      .data(d => d.data.map(point => ({ ...point, cause: d.cause })), d => `${d.cause}-${d.year}`)
+      .join(
+        enter => enter.append("circle")
+          .attr("class", "pt")
+          .attr("r", d => d.cause === appState.cause ? 4 : 3)
+          .attr("fill", d => causeColors(d.cause))
+          .attr("opacity", d => d.cause === appState.cause ? 1 : 0.4)
+          .attr("cx", d => x(d.year))
+          .attr("cy", d => y(d.rate))
+          .append("title")
+            .text(d => `${d.cause} — ${d.year}: ${d.rate.toFixed(1)}`),
+        update => update.transition().duration(200)
+          .attr("cx", d => x(d.year))
+          .attr("cy", d => y(d.rate))
+          .attr("r", d => d.cause === appState.cause ? 4 : 3)
+          .attr("opacity", d => d.cause === appState.cause ? 1 : 0.4),
+        exit => exit.remove()
+      );
+  }
 
+  function highlightCause() {
+    // Update line styles based on selected cause
+    zoomContainer.selectAll("g.series").each(function(seriesData) {
+      const isHighlighted = seriesData.cause === appState.cause;
+      d3.select(this).selectAll("path.line")
+        .transition().duration(200)
+        .attr("stroke-width", isHighlighted ? 4 : 2)
+        .attr("opacity", isHighlighted ? 1 : 0.4);
+
+      d3.select(this).selectAll("circle.pt")
+        .transition().duration(200)
+        .attr("r", isHighlighted ? 4 : 3)
+        .attr("opacity", isHighlighted ? 1 : 0.4);
+    });
+
+    // Update legend styles based on selected cause
+    d3.select("#trendLegend").selectAll(".legend-item").each(function() {
+      const cause = d3.select(this).attr("data-cause");
+      const isHighlighted = cause === appState.cause;
+      d3.select(this)
+        .transition().duration(200)
+        .style("font-weight", isHighlighted ? "bold" : "normal")
+        .style("opacity", isHighlighted ? 1 : 0.4);
+      
+      d3.select(this).select(".legend-line")
+        .transition().duration(200)
+        .style("width", isHighlighted ? "20px" : "16px")
+        .style("height", isHighlighted ? "4px" : "3px");
+    });
+
+    // Update trend label to show highlighted cause
+    const yStart = d3.min(years);
+    const yEnd = d3.max(years);
+    d3.select("#trendLabel").text(`${appState.selectedName} — ${appState.cause} (Years ${yStart}–${yEnd})`);
+  }
+
+  function renderTrend() {
+    const yStart = d3.min(years);
+    const yEnd = d3.max(years);
+
+    const chosen = appState.selectedName;
+    
+    // Get data for all causes for the selected state/region
+    allSeriesData = [];
+    causes.forEach(cause => {
+      const seriesMap = byCauseNameSeries.get(cause) || new Map();
+      const full = seriesMap.get(canon(chosen)) || [];
+      const filtered = full.filter(d => d.year >= yStart && d.year <= yEnd);
+      if (filtered.length > 0) {
+        allSeriesData.push({ cause, data: filtered });
       }
+    });
+
+    // Set original domains
+    xOriginalDomain = [yStart - 0.3, yEnd + 0.3];
+    
+    // Find max rate across all causes
+    let ymax = 1;
+    allSeriesData.forEach(s => {
+      const max = d3.max(s.data, d => d.rate) ?? 0;
+      if (max > ymax) ymax = max;
+    });
+    const yDomain = d3.scaleLinear().domain([0, ymax]).nice();
+    yOriginalDomain = yDomain.domain();
+
+    // Set initial domains
+    x.domain(xOriginalDomain);
+    y.domain(yOriginalDomain);
+
+    // Update paths first with initial domains
+    updateTrendAxes();
+    updateTrendPaths();
+
+    // Reset zoom after data is rendered
+    if (zoom) {
+      zoomBackground.call(zoom.transform, d3.zoomIdentity);
+    }
+
+    d3.select("#trendLabel").text(`${appState.selectedName} — ${appState.cause} (Years ${yStart}–${yEnd})`);
+
+    // Render legend
+    const legendEl = d3.select("#trendLegend");
+    legendEl.selectAll("*").remove();
+    const legend = legendEl.append("div")
+      .style("display", "flex")
+      .style("flex-wrap", "wrap")
+      .style("gap", "12px")
+      .style("font-size", "11px");
+
+    causes.forEach(cause => {
+      const isHighlighted = cause === appState.cause;
+      const item = legend.append("div")
+        .attr("class", "legend-item")
+        .attr("data-cause", cause)
+        .style("display", "flex")
+        .style("align-items", "center")
+        .style("gap", "6px")
+        .style("font-weight", isHighlighted ? "bold" : "normal")
+        .style("opacity", isHighlighted ? 1 : 0.4);
+      item.append("span")
+        .attr("class", "legend-line")
+        .style("display", "inline-block")
+        .style("width", isHighlighted ? "20px" : "16px")
+        .style("height", isHighlighted ? "4px" : "3px")
+        .style("background-color", causeColors(cause));
+      item.append("span")
+        .attr("class", "legend-text")
+        .text(cause);
+    });
+  }
 
       causeSel.on("change", () => {
         appState.cause = causeSel.property("value");
-        renderMap(); renderTrend();
+        renderMap();
+        highlightCause(); // Update trend chart highlighting
       });
       yearInput.on("input", () => {
         appState.year = +yearInput.property("value");
@@ -316,6 +529,39 @@ Promise.all([
         appState.year  = d3.max(years); yearInput.property("value", appState.year); yearVal.text(appState.year);
         appState.selectedName = "United States";
         renderMap(); renderTrend();
+      });
+
+      // Zoom controls
+      d3.select("#zoomIn").on("click", (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        if (zoom && xOriginalDomain && yOriginalDomain && xOriginalDomain.length >= 2 && yOriginalDomain.length >= 2) {
+          const node = zoomBackground.node();
+          if (node) {
+            const currentTransform = d3.zoomTransform(node) || d3.zoomIdentity;
+            const newTransform = currentTransform.scale(1.5);
+            zoomBackground.transition().duration(300).call(zoom.transform, newTransform);
+          }
+        }
+      });
+      d3.select("#zoomOut").on("click", (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        if (zoom && xOriginalDomain && yOriginalDomain && xOriginalDomain.length >= 2 && yOriginalDomain.length >= 2) {
+          const node = zoomBackground.node();
+          if (node) {
+            const currentTransform = d3.zoomTransform(node) || d3.zoomIdentity;
+            const newTransform = currentTransform.scale(1/1.5);
+            zoomBackground.transition().duration(300).call(zoom.transform, newTransform);
+          }
+        }
+      });
+      d3.select("#zoomReset").on("click", (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        if (zoom && xOriginalDomain && yOriginalDomain && xOriginalDomain.length >= 2 && yOriginalDomain.length >= 2) {
+          zoomBackground.transition().duration(300).call(zoom.transform, d3.zoomIdentity);
+        }
       });
 
   renderMap(); renderTrend();
