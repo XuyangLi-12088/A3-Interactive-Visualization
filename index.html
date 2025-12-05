@@ -115,12 +115,12 @@ const mapSVG   = d3.select("#map");
 const legendSVG= d3.select("#legend");
 const trendSVG = d3.select("#trend");
 
-// Map projection - use viewBox dimensions
+// Map projection
 const mapW = 760, mapH = 500;
 const proj = d3.geoAlbersUsa().translate([mapW/2, mapH/2]).scale(950);
 const geoPath = d3.geoPath(proj);
 
-// Trend chart scales - use viewBox dimensions
+// Trend chart scales
 const trW = 700, trH = 500;
 const trM = {t:20,r:20,b:32,l:44};
 const x = d3.scaleLinear().range([trM.l, trW - trM.r]);
@@ -168,7 +168,7 @@ const zoomBackground = trendSVG.append("rect")
 // Zoom behavior
 let zoom = null;
 
-// Color scheme for causes (10 distinct colors)
+// Color scheme for causes
 const causeColors = d3.scaleOrdinal()
   .range([
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
@@ -306,7 +306,7 @@ Promise.all([
         })
         .on("mousemove", (event, d) => {
           const nm = stateNameOf(d);
-          // Get current rates based on current appState, not the captured rates variable
+          // Get current rates based on current appState
           const currentRates = byCauseYearName.get(appState.cause)?.get(appState.year) || new Map();
           const v = currentRates.get(nm);
           tip.style("opacity", 1)
@@ -517,7 +517,7 @@ Promise.all([
       causeSel.on("change", () => {
         appState.cause = causeSel.property("value");
         renderMap();
-        highlightCause(); // Update trend chart highlighting
+        highlightCause();
       });
       yearInput.on("input", () => {
         appState.year = +yearInput.property("value");
